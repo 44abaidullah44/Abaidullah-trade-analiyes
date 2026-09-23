@@ -113,35 +113,51 @@ export default function App() {
         name: img.name,
       }));
 
-      const res = await fetch('/api/analyze-chart', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          images: payloadImages,
-          assetName: assetName.trim() || undefined,
-          accountBalance: accountBalance ? parseFloat(accountBalance) : undefined,
-          riskPercentage: riskPercentage ? parseFloat(riskPercentage) : undefined,
-          userNotes: userNotes.trim() || undefined,
-        }),
-      });
+      let res: Response | null = null;
+      let responseText = '';
+      let data: any = null;
 
-      const responseText = await res.text();
-      let data: any;
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        if (res.status === 413) {
-          throw new Error('Image files are too large. Please upload smaller chart screenshots.');
-        } else if (res.status === 504 || res.status === 502) {
-          throw new Error('AI analysis gateway timed out. Please retry with 3 screenshots.');
+      // Attempt request with automatic retry if proxy/server was initializing
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        res = await fetch('/api/analyze-chart', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify({
+            images: payloadImages,
+            assetName: assetName.trim() || undefined,
+            accountBalance: accountBalance ? parseFloat(accountBalance) : undefined,
+            riskPercentage: riskPercentage ? parseFloat(riskPercentage) : undefined,
+            userNotes: userNotes.trim() || undefined,
+          }),
+        });
+
+        responseText = await res.text();
+        try {
+          data = JSON.parse(responseText);
+          break; // successfully parsed JSON
+        } catch {
+          // If response is HTML and it's first attempt, wait 1.5s and retry
+          if (attempt === 1 && (responseText.trim().startsWith('<') || res.status === 502 || res.status === 503)) {
+            console.warn('Server returned HTML or gateway status on attempt 1, retrying after 1.5s...');
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          if (res.status === 413) {
+            throw new Error('Image files are too large. Please upload smaller chart screenshots.');
+          } else if (res.status === 504 || res.status === 502) {
+            throw new Error('AI analysis gateway timed out. Please retry with 2–3 screenshots.');
+          } else if (responseText.trim().startsWith('<')) {
+            throw new Error('The analysis engine was reconnecting. Please click "Run AI Scalping Analysis" again in a few moments.');
+          }
+          throw new Error(
+            `Server returned status ${res.status}: ${
+              responseText.slice(0, 150) || 'Unexpected response'
+            }`
+          );
         }
-        throw new Error(
-          `Server returned status ${res.status}: ${
-            responseText.slice(0, 150) || 'Unexpected response'
-          }`
-        );
       }
 
       if (!res.ok || !data.success) {
@@ -218,12 +234,20 @@ export default function App() {
 
         {/* Error Alert Box */}
         {error && (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-xs text-red-300 flex items-start gap-3 shadow-lg animate-fade-in">
-            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <h4 className="font-bold text-red-300 font-mono">Analysis Notice</h4>
-              <p>{error}</p>
+          <div className="bg-amber-500/10 border border-amber-500/25 rounded-xl p-4 text-xs text-amber-200 flex items-start justify-between gap-3 shadow-lg">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h4 className="font-bold text-amber-300 font-mono">Analysis Notice</h4>
+                <p className="text-white/85 leading-relaxed">{error}</p>
+              </div>
             </div>
+            <button
+              onClick={() => setError(null)}
+              className="text-white/50 hover:text-white px-2 py-1 rounded bg-white/5 hover:bg-white/10 transition-colors text-xs font-mono"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 

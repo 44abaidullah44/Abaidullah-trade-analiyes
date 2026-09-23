@@ -127,6 +127,20 @@ This is technical chart analysis, not a guaranteed prediction. The confidence sc
 async function startServer() {
   const app = express();
 
+  // Enable trust proxy for Cloud Run and reverse proxy ingress
+  app.set('trust proxy', true);
+
+  // CORS and preflight handling for all /api endpoints
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
   // Increase JSON payload limit to handle multi-image base64 uploads
   app.use(express.json({ limit: '50mb' }));
 
@@ -193,14 +207,15 @@ async function startServer() {
       let responseText: string | null = null;
       let lastError: any = null;
 
-      // Candidate models in order of availability and throughput
+      // Valid candidate models in order of capability and speed
       const candidateModels = [
         'gemini-3.8-flash',
         'gemini-3.7-flash',
         'gemini-3.6-flash',
+        'gemini-3.5-flash',
         'gemini-3.1-flash-lite',
-        'gemini-3.7-pro',
-        'gemini-3.6-pro',
+        'gemini-flash-latest',
+        'gemini-flash-lite-latest',
       ];
 
       for (const modelName of candidateModels) {
@@ -308,26 +323,47 @@ async function startServer() {
             break;
           }
         } catch (err: any) {
-          lastError = err;
           const errStr = err?.message || JSON.stringify(err);
-          // If 503 high demand or temporary capacity spike, immediately try next candidate model
+          // If 503 high demand or temporary capacity spike
           if (errStr.includes('503') || errStr.includes('UNAVAILABLE') || errStr.includes('high demand')) {
             console.log(`Model ${modelName} busy (503), switching to next fallback model...`);
+            lastError = err;
+          } else if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
+            console.log(`Model ${modelName} rate limit / quota exceeded (429), switching to next fallback model...`);
+            lastError = err;
+          } else if (errStr.includes('404') || errStr.includes('NOT_FOUND')) {
+            console.warn(`Model ${modelName} not found, skipping...`);
+            // Only set lastError if not already set by a more informative error
+            if (!lastError) {
+              lastError = err;
+            }
           } else {
             console.warn(`Model ${modelName} invocation failed:`, err?.message || err);
+            lastError = err;
           }
         }
       }
 
       if (!responseText) {
         const errorMsg = lastError?.message || (typeof lastError === 'string' ? lastError : 'Unknown error');
+        if (errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('quota')) {
+          let retryWait = '15';
+          const match = errorMsg.match(/retry in ([0-9.]+)s/i) || errorMsg.match(/retryDelay":"([0-9]+)s"/i);
+          if (match && match[1]) {
+            retryWait = `${Math.ceil(parseFloat(match[1]))}`;
+          }
+          return res.status(429).json({
+            error: `Gemini API rate limit reached. Please wait ${retryWait} seconds before requesting analysis again.`,
+            retryAfter: retryWait,
+          });
+        }
         if (errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE') || errorMsg.includes('high demand')) {
           return res.status(503).json({
             error: 'AI analysis engine is currently experiencing high demand. Please try again in a few moments.',
           });
         }
         return res.status(500).json({
-          error: errorMsg || 'Failed to receive analysis response from AI.',
+          error: errorMsg.length > 200 ? 'All AI models were temporarily busy or reached quota limits. Please retry in 15 seconds.' : errorMsg,
         });
       }
 
@@ -365,14 +401,14 @@ async function startServer() {
     }
   });
 
-  // Catch-all 404 for unmatched /api/* routes to prevent Vite from returning index.html
-  app.all('/api/*', (req, res) => {
+  // Catch-all 404 for unmatched /api routes to prevent Vite from returning index.html
+  app.all(['/api', '/api/*'], (req, res) => {
     res.status(404).json({ error: `API endpoint ${req.method} ${req.path} not found.` });
   });
 
   // Global API Error handler for payload limits or JSON errors
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (req.path.startsWith('/api') || req.url.startsWith('/api')) {
+    if (req.path.startsWith('/api') || req.url.startsWith('/api') || req.originalUrl?.startsWith('/api')) {
       console.error('API Middleware Error:', err);
       return res.status(err.status || 500).json({
         error: err.type === 'entity.too.large' 
